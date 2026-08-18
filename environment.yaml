@@ -1,0 +1,36 @@
+name: PANY
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.10
+  - pytorch==2.3.1
+  - torchvision==0.18.1
+  - pytorch-cuda=11.8       
+  - pip
+  - pip:
+      - numpy==1.26.1
+      - Pillow
+      - huggingface_hub
+      - einops
+      - safetensors
+      - openexr_numpy
+      - pytorch-lightning
+      - opencv-python==4.11.0.86
+      - hydra-core
+      - omegaconf
+      - matplotlib
+      - wandb
+      - open3d
+      - trimesh
+      - pycocotools
+      - transforms3d
+      - kornia
+      - psutil
+      - plyfile
+      - imageio
+      - pypng
+      - pyqt5

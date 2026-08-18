@@ -1,0 +1,22 @@
+model:
+  coarse_npoint: 196
+  fine_npoint: 2048
+  geo_embedding:
+    sigma_d: 0.2
+    sigma_a: 15
+    angle_k: 3
+    reduction_a: max
+    hidden_dim: 384 
+
+  fine_point_matching:
+    nblock: 3
+    input_dim: 256
+    hidden_dim: 256
+    out_dim: 256
+    pe_radius1: 0.1
+    pe_radius2: 0.2
+    focusing_factor: 3
+    temp: 0.1
+    sim_type: cosine
+    normalize_feat: True
+    loss_dis_thres: 0.15

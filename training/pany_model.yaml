@@ -1,0 +1,76 @@
+img_size: 518
+patch_size: 14
+depth: 24
+intermediate_layer_idx: [4, 11, 17, 23] 
+per_trained: true
+dino_frozen: true
+patch_embed: "dinov2_vitl14_reg"
+embed_dim: 1024 # 384
+
+total_steps: 25000
+train_steps_per_epoch: 1000
+val_steps_per_epoch: 200  
+learning_rate: 0.0001 # 1e-4
+min_learning_rate: 0.00001 # 1e-5
+warmup_steps: 500
+hold_steps: 10000
+decay_end_steps: 12000
+
+log_every_n_steps: 100
+enable_plotting: true 
+
+sam6d_model:
+  coarse_npoint: 196
+  fine_npoint: 1024
+  geo_embedding:
+    sigma_d: 0.2
+    sigma_a: 15
+    angle_k: 3
+    reduction_a: max
+    hidden_dim: 128
+
+  fine_point_matching:
+    nblock: 3
+    input_dim: 128
+    hidden_dim: 128
+    out_dim: 128
+    pe_radius1: 0.1
+    pe_radius2: 0.2
+    focusing_factor: 3
+    temp: 0.1
+    sim_type: cosine
+    normalize_feat: True
+    loss_dis_thres: 0.15
+
+common_config:
+  debug: true
+  training: true
+  load_depth: true
+  mask_depth: true
+  batch_size: 1
+  patch_size: 14
+  img_size: 518
+  view_outplane_thr: 10
+  view_inplane_thr: 30
+  crop_rel_pad: 0.1
+  num_views: [2, 4]
+  n_sample_point: 1024 # should be same as fine_npoint
+
+  augs:
+    cojitter: True
+    cojitter_ratio: 0.3
+    scales: [0.8, 1.2]
+    aspects: [0.33, 1.0]
+    color_jitter:
+      brightness: 0.5
+      contrast: 0.5
+      saturation: 0.5
+      hue: 0.1
+      p: 0.9
+    gray_scale: True
+    gau_blur: False
+
+  data:
+    train_base: '/media/tum/data1/datasets/bop-dataset/ycbv/train_pbr'
+    model_base: '/media/tum/data1/datasets/bop-dataset/ycbv/models'
+    test_base: '/media/tum/data1/datasets/bop-dataset/ycbv/test'

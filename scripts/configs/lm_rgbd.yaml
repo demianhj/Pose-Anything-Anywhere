@@ -1,0 +1,14 @@
+dataset:
+  root: /media/tum/data1/datasets/bop-dataset/lm
+  name: lm
+  batch_size: 32
+  obj_ids: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]  # LM objects
+  target_size: [518, 518]
+  depth_scale: 1 # Scale factor for depth images
+  
+mask_type: "gt" # Options: "gt", "cnos"
+# ckpt_path: False
+ckpt_path: ckpt/last_7500.ckpt
+model_config: pany_model
+model_name: fine_tuned
+output_base: /media/tum/data1/datasets/bop-dataset/lm/exp_out

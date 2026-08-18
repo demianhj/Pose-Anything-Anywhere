@@ -1,0 +1,35 @@
+exp_name: oryon_final
+exp_root: exp_data
+exp_tag: Ours
+use_seed: false
+seed: 1
+device: cuda
+compute_vsd: true
+viz_valid: false
+debug_valid: false
+profiler: false
+dataset:
+  root: /media/tum/data2/oryon/data
+  batch_size: 32
+  img_size:
+  - 518
+  - 518
+  max_corrs: 500
+  test:
+    name: nocs
+    split: cross_scene_test
+    obj: all
+test:
+  mask: oracle
+  add_description: 'yes'
+  only_save_masks: false
+  only_save_featmaps: false
+tmp:
+  logs_out: output/exp_data/oryon_final/runs
+  ckpt_out: output/exp_data/oryon_final/models
+  results_out: output/exp_data/oryon_final/results
+
+ckpt_path: ckpt/last_7500.ckpt
+model_config: pany_model 
+model_name: fine_tuned
+use_depth: True

@@ -1,0 +1,26 @@
+.DS_Store
+.vscode/
+
+# Ignore all checkpoint files anywhere in the project
+*.ckpt
+*.pth
+*.bin
+
+# Ignore all image files regardless of where they are
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.npy
+
+# Keep README figures
+!assets/*.png
+
+# Ignore bop_toolkit_lib
+bop_toolkit_lib/
+
+# Ignore pointnet2
+pointnet2/
+
+# Ignore __pycache__ directories
+__pycache__/

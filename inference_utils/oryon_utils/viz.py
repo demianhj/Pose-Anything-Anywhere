@@ -308,7 +308,7 @@ def corr_neg(rgb1 : ndarray, rgb2 : ndarray, corr_set: ndarray, neg_set1: ndarra
 
 def normalize_pcd_to_colors(pcd):
     """
-    将点云的 XYZ 坐标归一化到 [0, 1] 范围以用作 RGB 颜色。
+    Normalize point-cloud XYZ coordinates to [0, 1] for RGB colors.
     """
     pcd_min = pcd.min(axis=0)
     pcd_max = pcd.max(axis=0)
@@ -357,7 +357,7 @@ def pred_pose(rgb_a: ndarray, rgb_q: ndarray, gt_pose: ndarray, pred_pose: ndarr
             center=center_point, 
             radius=radius_in_pixels, 
             color=color, 
-            thickness=-1 # -1 表示画实心圆
+            thickness=-1 # -1 draws a filled circle.
         )
     cv2.imwrite(out_path, canvas)
     

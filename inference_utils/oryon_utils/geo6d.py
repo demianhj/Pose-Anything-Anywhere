@@ -9,6 +9,7 @@ import concurrent.futures
 from cv2 import imshow, waitKey
 from sklearn.neighbors import NearestNeighbors
 import torch.nn.functional as F
+from inference_utils.oryon_utils.misc import safe_l2
 
 # config = Config(ds_name='ycb')
 # bs_utils = Basic_Utils(config)
@@ -95,7 +96,7 @@ def best_fit_transform_with_RANSAC(A, B, max_iter = 20, match_err = 0.015, fix_p
         curr_T = curr_RT[:,3:4].T
 
         tran_A = np.dot(A,curr_R.T) + curr_T
-        err_dis = np.linalg.norm(tran_A - B,axis=1)
+        err_dis = safe_l2(tran_A - B, axis=1)
         match_idx = (err_dis <= match_err)
         inliers_num = match_idx.sum()
         if inliers_num > best_inlier_nums:

@@ -164,6 +164,37 @@ def unique_matches(matches: torch.Tensor) -> torch.Tensor:
     return torch.tensor(match_list).to(torch.float)
 
 
+def format_sym_set(syms: dict) -> np.ndarray:
+    '''
+    Format a BOP symmetry set as an ndarray of shape [N, 3, 4].
+    '''
+
+    syms_r = np.stack([np.asarray(sym['R']) for sym in syms], axis=0)
+    syms_t = np.stack([np.asarray(sym['t']) for sym in syms], axis=0)
+    return np.concatenate([syms_r, syms_t], axis=2)
+
+
+def safe_l2(values: np.ndarray, axis: int = -1) -> np.ndarray:
+    '''
+    Stable Euclidean norm that avoids overflow from intermediate squaring.
+    Non-finite rows are returned as inf.
+    '''
+
+    values = np.asarray(values, dtype=np.float64)
+    finite = np.isfinite(values).all(axis=axis)
+    values = np.where(np.isfinite(values), values, 0.0)
+    distances = np.hypot.reduce(values, axis=axis)
+    return np.where(finite, distances, np.inf)
+
+
+def safe_mean_l2(values: np.ndarray, axis: int = -1) -> float:
+    distances = safe_l2(values, axis=axis)
+    finite = np.isfinite(distances)
+    if not np.any(finite):
+        return np.inf
+    return float(np.mean(distances[finite]))
+
+
 def get_param_numbers(param_list : Sequence[Tensor]) -> int:
     '''
     Given a list of Tensors, considered a parameter lists, returns the number of parameters

@@ -1,79 +1,5 @@
 import numpy as np
 import cv2
-import open3d as o3d
-
-def save_pointcloud(points, colors=None, save_path="pointcloud.ply"):
-    # Create Open3D point cloud object
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(points)
-
-    if colors is not None:
-        colors = np.asarray(colors, dtype=np.float32)
-        if colors.max() > 1.0:
-            colors /= 255.0
-        pcd.colors = o3d.utility.Vector3dVector(colors)
-
-    # Save to .ply file
-    o3d.io.write_point_cloud(save_path, pcd)
-
-def open3d_vis(points, colors=None):
-    # Create Open3D point cloud object
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(points)
-
-    if colors is not None:
-        # Make sure colors are in [0,1] float32 format
-        colors = np.asarray(colors, dtype=np.float32)
-        if colors.max() > 1.0:
-            colors /= 255.0
-        pcd.colors = o3d.utility.Vector3dVector(colors)
-
-    # Visualize the point cloud using Open3D's built-in GUI
-    o3d.visualization.draw_geometries([pcd],
-                                      window_name="Open3D Point Cloud Viewer",
-                                      width=800,
-                                      height=600,
-                                      point_show_normal=False)
-
-def vis_pc(points):
-    # Create Open3D point cloud object
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(points)
-    # Visualize the point cloud using Open3D's built-in GUI
-    o3d.visualization.draw_geometries([pcd],
-                                      window_name="Open3D Point Cloud Viewer",
-                                      width=800,
-                                      height=600,
-                                      point_show_normal=False)
-
-def save_pc_together(pc1, pc2, save_path="pointcloud.ply"):
-    pcd1 = o3d.geometry.PointCloud()
-    pcd1.points = o3d.utility.Vector3dVector(pc1)
-    pcd1.colors = o3d.utility.Vector3dVector(np.tile([[1, 0, 0]], (pc1.shape[0], 1)))  # Red
-
-    pcd2 = o3d.geometry.PointCloud()
-    pcd2.points = o3d.utility.Vector3dVector(pc2)
-    pcd2.colors = o3d.utility.Vector3dVector(np.tile([[0, 1, 0]], (pc2.shape[0], 1)))  # Green
-
-    pcd_combined = pcd1 + pcd2
-    o3d.io.write_point_cloud(save_path, pcd_combined)
-
-def vis_pc_together(pc1, pc2):
-    # Create Open3D point cloud objects
-    pcd1 = o3d.geometry.PointCloud()
-    pcd1.points = o3d.utility.Vector3dVector(pc1)
-    pcd1.colors = o3d.utility.Vector3dVector(np.tile([[1, 0, 0]], (pc1.shape[0], 1)))  # Red
-
-    pcd2 = o3d.geometry.PointCloud()
-    pcd2.points = o3d.utility.Vector3dVector(pc2)
-    pcd2.colors = o3d.utility.Vector3dVector(np.tile([[0, 1, 0]], (pc2.shape[0], 1)))  # Green
-
-    # Visualize
-    o3d.visualization.draw_geometries([pcd1, pcd2],
-                                      window_name="Open3D Point Cloud Viewer",
-                                      width=800,
-                                      height=600,
-                                      point_show_normal=False)
 
 def calculate_2d_projections(coordinates_3d, intrinsics):
     """
@@ -138,37 +64,6 @@ def draw_3d_bbox(img, imgpts, color, size=3):
     for i, j in zip([0, 1, 2, 3],[1, 3, 0, 2]):
         img = cv2.line(img, tuple(imgpts[i]), tuple(imgpts[j]), color, size)
     return img
-
-def draw_text(image, text, position, font_scale=1, color=(255, 0, 0), thickness=2):
-    # Use OpenCV's putText function to add text to the image
-    font = cv2.FONT_HERSHEY_SIMPLEX  # Font type
-    cv2.putText(image, text, position, font, font_scale, color, thickness)
-    return image
-
-def compute_ADD(model_points: np.ndarray,
-                pred_pose: np.ndarray,
-                gt_pose: np.ndarray) -> float:
-    """
-    Computes the ADD (Average Distance of Model Points) metric.
-
-    Parameters:
-    - model_points: (N, 3) array of 3D model points
-    - pred_pose: (4, 4) predicted pose matrix
-    - gt_pose: (4, 4) ground truth pose matrix
-
-    Returns:
-    - ADD error (float)
-    """
-    # Transform model points with each pose
-    model_points_h = np.hstack([model_points, np.ones((model_points.shape[0], 1))])  # (N, 4)
-
-    pred_transformed = (pred_pose @ model_points_h.T).T[:, :3]  # (N, 3)
-    gt_transformed   = (gt_pose @ model_points_h.T).T[:, :3]    # (N, 3)
-
-    # Compute average Euclidean distance
-    add = np.mean(np.linalg.norm(pred_transformed - gt_transformed, axis=1))
-
-    return add
 
 def transform_coordinates_3d(coordinates, RT):
     """
@@ -315,4 +210,3 @@ def draw_pose_from_axis(
 
 
         
-

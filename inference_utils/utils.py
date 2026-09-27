@@ -1,44 +1,12 @@
 import torch
 import numpy as np
 import cv2
-import math
 from torchvision import transforms as TF
 from PIL import Image
 from training.data.datasets_utils import misc
 from training.data.datasets_utils.structs import CameraModel
 
 to_tensor = TF.ToTensor()
-
-def load_image(image_path, target_size=(518, 518)):
-    """
-    Load an image from a file path.
-    """
-
-    image = Image.open(image_path)
-    image = image.convert("RGB")  
-
-    # Resize with new dimensions (width, height)
-    image = image.resize(target_size, Image.Resampling.BICUBIC)
-    image = to_tensor(image)
-
-    return image
-
-def expand_box(x_min, x_max, y_min, y_max, scale, img_w, img_h):
-    bbox_w = x_max - x_min
-    bbox_h = y_max - y_min
-    center_x = (x_min + x_max) / 2
-    center_y = (y_min + y_max) / 2
-
-    half_w = bbox_w * scale / 2
-    half_h = bbox_h * scale / 2
-
-    x1 = int(max(center_x - half_w, 0))
-    x2 = int(min(center_x + half_w, img_w))
-    y1 = int(max(center_y - half_h, 0))
-    y2 = int(min(center_y + half_h, img_h))
-
-    return x1, y1, x2, y2
-
 
 def center_crop(image, mask, depth_map, intri, extri, target_image_shape=(518, 518), crop_rel_pad=0):
     if isinstance(image, torch.Tensor):
@@ -410,277 +378,179 @@ def crop_input(image, mask, depth_map, cam_K, target_size, padding_scale=1.5):
 
     return img_padded, mask_padded, depth_padded, K_new, valid_flag
 
-def crop_input_rgb(image, mask, cam_K, target_size, padding_scale=1.5):
+def backproject_depth_to_points(depth_map, K, mask=None, conf_map=None,
+                                conf_thresh=0.0, stride=2,
+                                z_min=1e-6, z_max=np.inf):
     """
-    Same as previous crop, but accepts tensors or numpy arrays directly.
-
-    Args:
-        cam_K (np.ndarray): 3x3 intrinsic matrix
-        image (np.ndarray or torch.Tensor): RGB image [H,W,3] or [3,H,W]
-        mask (np.ndarray or torch.Tensor): grayscale mask [H,W]
-        target_size (tuple): (width, height)
-        padding_scale (float): bbox padding
-
-    Returns:
-        image_tensor: torch.Tensor [3, H, W]
-        padded_mask: np.ndarray [H, W]
-        K_new: np.ndarray [3, 3]
+    输入:
+      depth_map: (H,W)
+      K: 3x3
+      mask: (H,W) bool，可选
+      conf_map: (H,W) float，可选
+    返回:
+      points: (M,3) float32
+      pix_uv: (M,2) int  (便于取颜色)
     """
-    # Convert tensors to numpy
-    if isinstance(image, torch.Tensor):
-        image = image.detach().cpu().numpy()
-        if image.shape[0] == 3:  # [3, H, W] → [H, W, 3]
-            image = np.transpose(image, (1, 2, 0))
-    if isinstance(mask, torch.Tensor):
-        mask = mask.detach().cpu().numpy()
-    if isinstance(cam_K, torch.Tensor):
-        cam_K = cam_K.detach().cpu().numpy()
+    depth_map = depth_map.squeeze(-1)
+    H, W = depth_map.shape
+    fx, s, cx = K[0,0], K[0,1], K[0,2]
+    fy, cy    = K[1,1], K[1,2]
 
-    image = (image * 255).astype(np.uint8) if image.dtype != np.uint8 else image
-    mask = mask.astype(np.uint8)
+    u, v = np.meshgrid(np.arange(W), np.arange(H))
+    u = u.astype(np.float32); v = v.astype(np.float32)
 
-    # --- find bbox + padded box coords ---
-    ys, xs = np.where(mask > 0)
-    x_min, x_max = xs.min(), xs.max()
-    y_min, y_max = ys.min(), ys.max()
+    z = depth_map.astype(np.float32)
+    valid = np.isfinite(z) & (z > z_min) & (z < z_max)
 
-    w_box = x_max - x_min
-    h_box = y_max - y_min
-    cx, cy = x_min + w_box / 2, y_min + h_box / 2
-    half_w = w_box / 2 * padding_scale
-    half_h = h_box / 2 * padding_scale
+    if mask is not None:
+        valid &= mask.astype(bool)
+    if conf_map is not None and conf_thresh is not None:
+        valid &= (conf_map >= conf_thresh)
 
-    x1 = int(max(0, cx - half_w))
-    x2 = int(min(image.shape[1], cx + half_w))
-    y1 = int(max(0, cy - half_h))
-    y2 = int(min(image.shape[0], cy + half_h))
+    # 下采样以减小点数
+    if stride > 1:
+        sub = ( (np.arange(H)[:,None] % stride == 0) & (np.arange(W)[None,:] % stride == 0) )
+        valid &= sub
 
-    cropped_img = image[y1:y2, x1:x2]
-    cropped_mask = mask[y1:y2, x1:x2]
+    if not np.any(valid):
+        return np.zeros((0,3), np.float32), np.zeros((0,2), np.int32)
 
-    # --- resize ---
-    tgt_w, tgt_h = target_size
-    crop_w, crop_h = x2 - x1, y2 - y1
-    scale = min(tgt_w / crop_w, tgt_h / crop_h)
-    new_w = int(crop_w * scale)
-    new_h = int(crop_h * scale)
+    u = u[valid]; v = v[valid]; z = z[valid]
 
-    img_resized = cv2.resize(cropped_img, (new_w, new_h))
-    mask_resized = cv2.resize(cropped_mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+    # 考虑可能的 skew: u' = u - cx - s*(v - cy)/fy *? (严格模型更复杂)
+    # 这里采用常见近似：忽略 s 对 v 的耦合，直接用像素坐标减主点再除以焦距
+    x_n = (u - cx) / fx
+    y_n = (v - cy) / fy
 
-    # --- pad ---
-    pad_w = tgt_w - new_w
-    pad_h = tgt_h - new_h
-    pad_left = pad_w // 2
-    pad_right = pad_w - pad_left
-    pad_top = pad_h // 2
-    pad_bottom = pad_h - pad_top
+    X = x_n * z
+    Y = y_n * z
+    Z = z
 
-    img_padded = cv2.copyMakeBorder(img_resized, pad_top, pad_bottom, pad_left, pad_right, cv2.BORDER_CONSTANT, value=0)
-    mask_padded = cv2.copyMakeBorder(mask_resized, pad_top, pad_bottom, pad_left, pad_right, cv2.BORDER_CONSTANT, value=0)
+    pts = np.stack([X, Y, Z], axis=1).astype(np.float32)
+    #uv  = np.stack([u.astype(np.int32), v.astype(np.int32)], axis=1)
+    return pts, (u.astype(np.int32), v.astype(np.int32))
 
-    # --- apply mask ---
-    img_padded = img_padded * (mask_padded[:, :, None] > 0)
-
-    # --- adjust intrinsics ---
-    K_new = cam_K.copy()
-    K_new[0, 0] *= scale
-    K_new[1, 1] *= scale
-    K_new[0, 2] = (cam_K[0, 2] - x1) * scale + pad_left
-    K_new[1, 2] = (cam_K[1, 2] - y1) * scale + pad_top
-
-    # --- to tensor ---
-    pil = Image.fromarray(img_padded)
-    img_padded = to_tensor(pil)
-
-    return img_padded, mask_padded, K_new
-
-def crop_cnos(cam_K, image_path, mask, target_size, padding_scale=1.5, depth_path=None):
+def umeyama_pose(src, dst, with_scaling=False):
     """
-    Center‐crop based on mask bbox, then resize with uniform scale + pad to target_size,
-    and adjust intrinsics so there’s no non‐uniform distortion.
-
-    Args:
-        cam_K (np.ndarray): 3x3 intrinsic matrix
-        image_path (str): path to RGB image
-        target_size (tuple): (width, height)
-        padding_scale (float): factor to expand bbox before cropping
-
-    Returns:
-        resized_tensor (torch.Tensor): normalized, padded tensor image
-        padded_mask (np.ndarray): binary mask at target_size
-        K_new (np.ndarray): adjusted intrinsic matrix
+    src, dst: (N,3) 对应点
+    返回: 4x4 位姿矩阵 (dst ≈ T * src)
     """
-    # --- load ---
-    image = cv2.cvtColor(cv2.imread(image_path), cv2.COLOR_BGR2RGB)
-    if depth_path is not None:
-        depth_map = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
+    assert src.shape == dst.shape
+    n = src.shape[0]
 
-    # --- find bbox + padded box coords ---
-    ys, xs = np.where(mask>0)
-    x_min, x_max = xs.min(), xs.max()
-    y_min, y_max = ys.min(), ys.max()
+    mu_src = src.mean(axis=0)
+    mu_dst = dst.mean(axis=0)
 
-    # expand box
-    w_box = x_max - x_min
-    h_box = y_max - y_min
-    cx, cy = x_min + w_box/2, y_min + h_box/2
-    half_w = w_box/2 * padding_scale
-    half_h = h_box/2 * padding_scale
+    X = src - mu_src
+    Y = dst - mu_dst
 
-    x1 = int(max(0, cx - half_w))
-    x2 = int(min(image.shape[1], cx + half_w))
-    y1 = int(max(0, cy - half_h))
-    y2 = int(min(image.shape[0], cy + half_h))
+    C = (Y.T @ X) / n
+    U, S, Vt = np.linalg.svd(C)
+    R = U @ Vt
+    if np.linalg.det(R) < 0:
+        Vt[-1, :] *= -1
+        R = U @ Vt
 
-    # --- crop ---
-    cropped_img  = image[y1:y2, x1:x2]
-    cropped_mask = mask [y1:y2, x1:x2]
-    if depth_path is not None:
-        cropped_depth = depth_map[y1:y2, x1:x2]
+    if with_scaling:
+        var_src = (X**2).sum() / n
+        s = np.sum(S) / var_src
+    else:
+        s = 1.0
 
-    # --- compute uniform scale + resized dims ---
-    tgt_w, tgt_h = target_size
-    crop_w, crop_h = x2 - x1, y2 - y1
-    scale = min(tgt_w / crop_w, tgt_h / crop_h)
-    new_w = int(crop_w * scale)
-    new_h = int(crop_h * scale)
+    t = mu_dst - s * (R @ mu_src)
 
-    # resize
-    img_resized  = cv2.resize(cropped_img,  (new_w, new_h))
-    mask_resized= cv2.resize(cropped_mask,(new_w, new_h))
-    if depth_path is not None:
-        depth_resized = cv2.resize(cropped_depth, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+    T = np.eye(4)
+    T[:3,:3] = s*R
+    T[:3,3] = t
+    return T,s,R,t
 
-    # --- pad to target_size (centered) ---
-    pad_w = tgt_w - new_w
-    pad_h = tgt_h - new_h
-    pad_left = pad_w // 2
-    pad_right = pad_w - pad_left
-    pad_top = pad_h // 2
-    pad_bottom = pad_h - pad_top
+def estimate_intrinsics_from_pointmap(
+    ptsmaps_0,                # (H, W, 3) -> XYZ in camera coords
+    mask_0=None,              # (H, W)    -> boolean valid mask (optional)
+    stride=8,                 # subsampling to speed up
+    allow_skew=False          # set True to also solve skew s
+):
+    H, W, _ = ptsmaps_0.shape
 
-    img_padded = cv2.copyMakeBorder(
-        img_resized, pad_top, pad_bottom, pad_left, pad_right,
-        borderType=cv2.BORDER_CONSTANT, value=[0,0,0]
-    )
-    mask_padded = cv2.copyMakeBorder(
-        mask_resized, pad_top, pad_bottom, pad_left, pad_right,
-        borderType=cv2.BORDER_CONSTANT, value=0
-    )
-    if depth_path is not None:
-        depth_padded = cv2.copyMakeBorder(
-            depth_resized, pad_top, pad_bottom, pad_left, pad_right,
-            borderType=cv2.BORDER_CONSTANT, value=0
-        )
+    # pixel grid (u right, v down), u in [0, W-1], v in [0, H-1]
+    u, v = np.meshgrid(np.arange(W), np.arange(H))
+    u = u.astype(np.float32)
+    v = v.astype(np.float32)
 
-    # mask the img
-    img_padded = img_padded * (mask_padded[:, :, None] > 0)
-    if depth_path is not None:
-        depth_padded = depth_padded * (mask_padded > 0)
+    X = ptsmaps_0[..., 0].astype(np.float32)
+    Y = ptsmaps_0[..., 1].astype(np.float32)
+    Z = ptsmaps_0[..., 2].astype(np.float32)
 
-    # --- adjust intrinsics ---
-    K_new = cam_K.copy()
-    # uniform scale on focal lengths
-    K_new[0,0] *= scale
-    K_new[1,1] *= scale
-    # principal point: original cx,cy → shifted by crop and pad
-    cx_new = (cam_K[0,2] - x1) * scale + pad_left
-    cy_new = (cam_K[1,2] - y1) * scale + pad_top
-    K_new[0,2] = cx_new
-    K_new[1,2] = cy_new
+    # Validity: Z>0, finite
+    valid = np.isfinite(X) & np.isfinite(Y) & np.isfinite(Z) & (Z > 1e-6)
+    if mask_0 is not None:
+        valid &= mask_0.astype(bool)
 
-    # --- to tensor ---
-    pil = Image.fromarray(img_padded)
-    tensor = to_tensor(pil)
+    # Subsample
+    valid[::stride, ::stride] &= True
+    valid = valid & valid  # no-op to ensure boolean
 
-    if depth_path is None:
-        depth_padded = None
+    X = X[valid]; Y = Y[valid]; Z = Z[valid]
+    u = u[valid]; v = v[valid]
 
-    return tensor, mask_padded, K_new, depth_padded
+    if X.size < 10:
+        raise ValueError(f"有效点过少：{X.size}，请降低 stride 或放宽 mask。")
 
-def crop_template(image_path, mask_path, xyz_path, target_size, padding_scale=1.5):
+    x_n = X / Z
+    y_n = Y / Z
+
+    # --- Solve least squares ---
+    # u = fx * x_n + cx (+ s * y_n if allow_skew)
+    if allow_skew:
+        # parameters: [fx, s, cx]
+        A_u = np.stack([x_n, y_n, np.ones_like(x_n)], axis=1)
+        theta_u, *_ = np.linalg.lstsq(A_u, u, rcond=None)
+        fx, s, cx = theta_u
+    else:
+        # parameters: [fx, cx]
+        A_u = np.stack([x_n, np.ones_like(x_n)], axis=1)
+        theta_u, *_ = np.linalg.lstsq(A_u, u, rcond=None)
+        fx, cx = theta_u
+        s = 0.0
+
+    # v = fy * y_n + cy  (we keep skew only in u-equation)
+    A_v = np.stack([y_n, np.ones_like(y_n)], axis=1)
+    theta_v, *_ = np.linalg.lstsq(A_v, v, rcond=None)
+    fy, cy = theta_v
+
+    # Residuals / RMSE
+    u_pred = (fx * x_n + (s * y_n if allow_skew else 0.0)) + cx
+    v_pred = fy * y_n + cy
+    rmse_u = float(np.sqrt(np.mean((u - u_pred)**2)))
+    rmse_v = float(np.sqrt(np.mean((v - v_pred)**2)))
+
+    K = np.array([
+        [fx, s,  cx],
+        [0.0, fy, cy],
+        [0.0, 0.0, 1.0]
+    ], dtype=np.float64)
+
+    report = {
+        "num_points": int(X.size),
+        "rmse_u_px": rmse_u,
+        "rmse_v_px": rmse_v,
+        "mean_Z": float(np.mean(Z)),
+        "min_Z": float(np.min(Z)),
+        "max_Z": float(np.max(Z)),
+        "stride": int(stride),
+        "allow_skew": bool(allow_skew),
+    }
+    return K, report
+
+def transform_points(T, pts):
     """
-    Center‐crop based on mask bbox, then resize with uniform scale + pad to target_size,
-    and adjust intrinsics so there’s no non‐uniform distortion.
-
-    Args:
-        cam_K (np.ndarray): 3x3 intrinsic matrix
-        image_path (str): path to RGB image
-        mask_path (str): path to grayscale mask image
-        target_size (tuple): (width, height)
-        padding_scale (float): factor to expand bbox before cropping
-
-    Returns:
-        resized_tensor (torch.Tensor): normalized, padded tensor image
-        padded_mask (np.ndarray): binary mask at target_size
-        K_new (np.ndarray): adjusted intrinsic matrix
+    用 4x4 位姿矩阵 T 变换点云
+    参数:
+      T   : (4,4) 相机外参
+      pts : (N,3) 点云
+    返回:
+      pts_world: (N,3) 变换后的点云
     """
-    # --- load ---
-    image = cv2.cvtColor(cv2.imread(image_path), cv2.COLOR_BGR2RGB)
-    mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-    xyz_map = np.load(xyz_path)
-
-    # --- find bbox + padded box coords ---
-    ys, xs = np.where(mask>0)
-    x_min, x_max = xs.min(), xs.max()
-    y_min, y_max = ys.min(), ys.max()
-
-    # expand box
-    w_box = x_max - x_min
-    h_box = y_max - y_min
-    cx, cy = x_min + w_box/2, y_min + h_box/2
-    half_w = w_box/2 * padding_scale
-    half_h = h_box/2 * padding_scale
-
-    x1 = int(max(0, cx - half_w))
-    x2 = int(min(image.shape[1], cx + half_w))
-    y1 = int(max(0, cy - half_h))
-    y2 = int(min(image.shape[0], cy + half_h))
-
-    # --- crop ---
-    cropped_img  = image[y1:y2, x1:x2]
-    cropped_mask = mask[y1:y2, x1:x2]
-    cropped_xyz = xyz_map[y1:y2, x1:x2]
-
-    # --- compute uniform scale + resized dims ---
-    tgt_w, tgt_h = target_size
-    crop_w, crop_h = x2 - x1, y2 - y1
-    scale = min(tgt_w / crop_w, tgt_h / crop_h)
-    new_w = int(crop_w * scale)
-    new_h = int(crop_h * scale)
-
-    # resize
-    img_resized  = cv2.resize(cropped_img,  (new_w, new_h))
-    mask_resized= cv2.resize(cropped_mask,(new_w, new_h))
-    xyz_resized = cv2.resize(cropped_xyz, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
-
-    # --- pad to target_size (centered) ---
-    pad_w = tgt_w - new_w
-    pad_h = tgt_h - new_h
-    pad_left   = pad_w // 2
-    pad_right  = pad_w - pad_left
-    pad_top    = pad_h // 2
-    pad_bottom = pad_h - pad_top
-
-    img_padded = cv2.copyMakeBorder(
-        img_resized, pad_top, pad_bottom, pad_left, pad_right,
-        borderType=cv2.BORDER_CONSTANT, value=[0,0,0]
-    )
-    mask_padded = cv2.copyMakeBorder(
-        mask_resized, pad_top, pad_bottom, pad_left, pad_right,
-        borderType=cv2.BORDER_CONSTANT, value=0
-    )
-    xyz_padded = cv2.copyMakeBorder(
-        xyz_resized, pad_top, pad_bottom, pad_left, pad_right,
-        borderType=cv2.BORDER_CONSTANT, value=[0,0,0]
-    )
-
-    # mask the img and xyz 
-    img_padded = img_padded * (mask_padded[:, :, None] > 0)
-    xyz_padded = xyz_padded * (mask_padded[:, :, None] > 0)
-    # --- to tensor ---
-    pil = Image.fromarray(img_padded)
-    tensor = to_tensor(pil)
-
-    return tensor, mask_padded, xyz_padded
+    pts_h = np.hstack([pts, np.ones((pts.shape[0],1))])  # (N,4)
+    pts_w = (T @ pts_h.T).T
+    return pts_w[:, :3]

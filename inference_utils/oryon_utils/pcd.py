@@ -7,7 +7,7 @@ import numpy as np
 from typing import Tuple, Optional
 from torch import Tensor
 from torch.nn.functional import cosine_similarity
-from inference_utils.oryon_utils.misc import torch_sample_select
+from inference_utils.oryon_utils.misc import safe_mean_l2, torch_sample_select
 
 def get_diameter(pcd : np.ndarray) -> float:
 
@@ -122,9 +122,9 @@ def torch_transform_pcd(pcd : Tensor, r : Tensor, t : Tensor) -> Tensor:
 
 def np_transform_pcd(pcd: np.ndarray, r : np.ndarray, t: np.ndarray) -> np.ndarray:
     
-    pcd = pcd.astype(np.float16)
-    r = r.astype(np.float16)
-    t = t.astype(np.float16)
+    pcd = pcd.astype(np.float64)
+    r = r.astype(np.float64)
+    t = t.astype(np.float64)
     rot_pcd = np.dot(np.asarray(pcd), r.T) + t
     return rot_pcd 
 
@@ -137,7 +137,7 @@ def compute_add(pcd : np.ndarray, pred_pose : np.ndarray, gt_pose : np.ndarray) 
         model_gt = np_transform_pcd(pcd, gt_r, gt_t)
 
         # ADD computation
-        add = np.mean(np.linalg.norm(model_pred - model_gt, axis=1))
+        add = safe_mean_l2(model_pred - model_gt, axis=1)
 
         return add
 

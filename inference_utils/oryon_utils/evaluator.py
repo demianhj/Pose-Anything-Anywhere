@@ -6,9 +6,8 @@ from .metrics import *
 import pickle
 from typing import Optional
 from bop_toolkit_lib.pose_error import my_mssd, my_mspd, vsd
-from bop_toolkit_lib.misc import format_sym_set
 from inference_utils.oryon_utils.pcd import get_diameter
-from inference_utils.oryon_utils.misc import sorted_alphanumeric
+from inference_utils.oryon_utils.misc import format_sym_set, sorted_alphanumeric
 
 def process_tensor(t : Tensor) -> Tensor:
     '''
@@ -260,7 +259,7 @@ class Evaluator(object):
             #o3d_viz(obj_model, pred_pose, gt_pose)
             self.metrics['ADD(S)-0.1d'].append(float(adds <= add_diam*0.1))
             
-            pred_pose, gt_pose = pred_pose.astype(np.float16), gt_pose.astype(np.float16)
+            pred_pose, gt_pose = pred_pose.astype(np.float32), gt_pose.astype(np.float32)
             
             pred_r, pred_t = pred_pose[:3,:3], np.expand_dims(pred_pose[:3,3],axis=1) * 1000
             gt_r, gt_t = gt_pose[:3,:3], np.expand_dims(gt_pose[:3,3],axis=1) * 1000
@@ -427,4 +426,3 @@ class Evaluator(object):
 
 
     
-

@@ -65,31 +65,25 @@ class BOP_Dataset(Dataset):
             with open(scene_gt_info_path, 'r') as f:
                 scene_gt_info = json.load(f)
 
-            # get the anchor image (first image of the scene) - YCBV
-            if self.dataset_name == 'ycbv':
-                frame_ids = sorted(scene_gt.keys(), key=int)
-                for frame_id in frame_ids:
-                    test_item_gt = scene_gt[str(frame_id)]
-                    test_item_gt_info = scene_gt_info[str(frame_id)]
-                    inst_id = next(idx for idx, item in enumerate(test_item_gt) if item['obj_id'] == obj_id)
-                    # check the visibility of the instance
-                    visib = test_item_gt_info[inst_id]['visib_fract']
-                    if visib >= 0.5:
-                        reference_id = int(frame_id)
-                        break
-            elif self.dataset_name == 'lm':
-                frame_ids = sorted(scene_gt.keys(), key=int)
-                for frame_id in frame_ids:
-                    test_item_gt = scene_gt[str(frame_id)]
-                    test_item_gt_info = scene_gt_info[str(frame_id)]
-                    inst_id = next(idx for idx, item in enumerate(test_item_gt) if item['obj_id'] == obj_id)
-                    # check the visibility of the instance
-                    visib = test_item_gt_info[inst_id]['visib_fract']
-                    if visib >= 0.5:
-                        reference_id = int(frame_id)
-                        break
-            else:
+            if self.dataset_name not in {'ycbv', 'lm', 'lmo'}:
                 raise ValueError(f"Unsupported dataset name: {self.dataset_name}")
+
+            reference_id = None
+            frame_ids = sorted(scene_gt.keys(), key=int)
+            for frame_id in frame_ids:
+                test_item_gt = scene_gt[str(frame_id)]
+                test_item_gt_info = scene_gt_info[str(frame_id)]
+                inst_id = next((idx for idx, item in enumerate(test_item_gt) if item['obj_id'] == obj_id), None)
+                if inst_id is None:
+                    continue
+
+                visib = test_item_gt_info[inst_id]['visib_fract']
+                if visib >= 0.5:
+                    reference_id = int(frame_id)
+                    break
+
+            if reference_id is None:
+                raise ValueError(f"No visible reference frame found for scene {scene_id}, obj {obj_id}")
 
             anchor_image_path = osp.join(self.test_dir, f'{scene_id:06d}', 'rgb', f'{reference_id:06d}.png')
             anchor_depth_path = osp.join(self.test_dir, f'{scene_id:06d}', 'depth', f'{reference_id:06d}.png')

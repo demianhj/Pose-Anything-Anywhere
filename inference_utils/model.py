@@ -6,24 +6,24 @@ from training.lightning_pany import PANY
 class LoRALinear(nn.Module):
     def __init__(self, original: nn.Linear, r: int, alpha: float, dropout: float):
         super().__init__()
-        # 保留原来的权重和偏置
+        # Keep the original weight and bias.
         self.original = original
         self.in_features  = original.in_features
         self.out_features = original.out_features
 
-        # LoRA 参数
+        # LoRA parameters.
         self.r = r
         self.scaling = alpha / r
         self.lora_A = nn.Linear(self.in_features,  r, bias=False)
         self.lora_B = nn.Linear(r, self.out_features, bias=False)
         self.dropout = nn.Dropout(dropout)
 
-        # 初始化 A、B
+        # Initialize A and B.
         nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5))
         nn.init.zeros_(self.lora_B.weight)
 
     def forward(self, x):
-        # 原始输出 + LoRA 输出
+        # Base output plus LoRA output.
         return self.original(x) + self.dropout(self.lora_B(self.lora_A(x))) * self.scaling
 
 def lora_to_global_attention(model, r=8, alpha=32, dropout=0.05):

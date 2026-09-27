@@ -12,7 +12,7 @@ from typing import Tuple
 from torch import Tensor
 import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
-from inference_utils.oryon_utils.misc import unique_matches
+from inference_utils.oryon_utils.misc import safe_l2, safe_mean_l2, unique_matches
 from torch.distributions import Categorical
 
 def mask_iou(mask1: Tensor, mask2: Tensor) -> Tensor:
@@ -200,7 +200,7 @@ def compute_add(pcd : np.ndarray, pred_pose : np.ndarray, gt_pose : np.ndarray) 
         model_gt = np_transform_pcd(pcd, gt_r, gt_t)
 
         # ADD computation
-        add = np.mean(np.linalg.norm(model_pred - model_gt, axis=1))
+        add = safe_mean_l2(model_pred - model_gt, axis=1)
 
         return add
 
@@ -211,6 +211,11 @@ def compute_adds(pcd : np.ndarray, pred_pose : np.ndarray, gt_pose : np.ndarray)
 
         model_pred = np_transform_pcd(pcd, pred_r, pred_t)
         model_gt = np_transform_pcd(pcd, gt_r, gt_t)
+        finite = np.isfinite(model_pred).all(axis=1) & np.isfinite(model_gt).all(axis=1)
+        if not np.any(finite):
+            return np.inf
+        model_pred = model_pred[finite]
+        model_gt = model_gt[finite]
         
         # ADD-S computation
         kdt = KDTree(model_gt, metric='euclidean')
@@ -254,6 +259,6 @@ def compute_RT_distances(pose1 : np.ndarray, pose2 : np.ndarray):
     arccos_arg = np.clip(arccos_arg, -1+1e-12, 1-1e-12)
     theta = np.arccos(arccos_arg) * 180/np.pi
     theta[np.isnan(theta)] = 180.
-    shift = np.linalg.norm(T1-T2,axis=-1) * 100
+    shift = safe_l2(T1-T2, axis=-1) * 100
 
     return theta, shift

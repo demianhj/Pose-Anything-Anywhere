@@ -19,8 +19,5 @@
 # Ignore bop_toolkit_lib
 bop_toolkit_lib/
 
-# Ignore pointnet2
-pointnet2/
-
 # Ignore __pycache__ directories
 __pycache__/

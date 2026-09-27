@@ -34,3 +34,6 @@ dependencies:
       - imageio
       - pypng
       - pyqt5
+      - vispy==0.9.4
+      - PyOpenGL==3.1.5
+      - PyOpenGL-accelerate==3.1.10

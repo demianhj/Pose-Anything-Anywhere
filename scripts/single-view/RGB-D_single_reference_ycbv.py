@@ -9,21 +9,21 @@ import trimesh
 import sys
 sys.path.append(os.getcwd())
 from vggt.utils.geometry import unproject_depth_map_to_point_map, depth_to_cam_coords_points
-from hydra import initialize, compose
+from training.vis_utils import visualize_pts
+from hydra import compose, initialize_config_dir
 from inference_utils.visualization import *
 from inference_utils.utils import center_crop, crop_input, to_tensor
 from inference_utils.model import load_model
-from inference_utils.pose_estimation import robust_umeyama, estimate_pose_from_2d3d 
+from inference_utils.pose_estimation import robust_umeyama 
 
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
 from pytorch_lightning import Trainer, LightningModule
-from inference_utils.oryon_utils import viz
-from training.vis_utils import visualize_pts
-from inference_utils.datasets import LMO_Dataset
+from inference_utils.datasets import BOP_Dataset
 from inference_utils.oryon_utils.pcd import get_diameter
 from inference_utils.oryon_utils.metrics import compute_add, compute_adds
-from bop_toolkit_lib.misc import format_sym_set
+from inference_utils.oryon_utils.misc import format_sym_set, safe_l2
+import time
 
 class PANY_Pipeline(LightningModule):
     """
@@ -37,8 +37,9 @@ class PANY_Pipeline(LightningModule):
         super().__init__()
 
         self.args = args
-            
-        with initialize(version_base=None, config_path="../training"):                                                                                              
+
+        config_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../..", "training"))
+        with initialize_config_dir(version_base=None, config_dir=config_dir):
             config = compose(config_name=args.model_config)
     
         # Initialize the VGGT model
@@ -56,8 +57,8 @@ class PANY_Pipeline(LightningModule):
     def get_dataset(self) -> torch.utils.data.Dataset:
         dataset_name = self.args.dataset.name
         
-        if dataset_name == "lmo":
-            return LMO_Dataset(self.args)
+        if dataset_name in ['ycbv', 'lm']:
+            return BOP_Dataset(self.args)
         else:
             raise RuntimeError(f"Dataset {dataset_name} not supported")
 
@@ -70,12 +71,9 @@ class PANY_Pipeline(LightningModule):
         BS = batch['anchor_image'].shape[0]
         target_size = (518, 518)
         for i_b in range(BS):
-            #-----------------------------------------------------
-            obj_id = batch['obj_id'][i_b].cpu().item()
             scene_id = batch['scene_id'][i_b].cpu().item()
+            obj_id = batch['obj_id'][i_b].cpu().item()
             image_id = batch['image_id'][i_b].cpu().item()
-            # if not (obj_id == 1 and image_id ==47):
-            #     continue
             anchor_image = batch['anchor_image'][i_b]
             anchor_mask = batch['anchor_mask'][i_b]
             anchor_depth = batch['anchor_depth'][i_b]
@@ -90,38 +88,33 @@ class PANY_Pipeline(LightningModule):
 
             # process the anchor image and mask
             anchor_image, anchor_mask, anchor_depth, anchor_camera, anchor_pose = center_crop(anchor_image, 
-                                                                                    anchor_mask, 
-                                                                                    anchor_depth, 
-                                                                                    anchor_camera, 
-                                                                                    anchor_pose, 
-                                                                                    target_image_shape=target_size)
+                                                                                            anchor_mask, 
+                                                                                            anchor_depth, 
+                                                                                            anchor_camera, 
+                                                                                            anchor_pose, 
+                                                                                            target_image_shape=target_size)
             anchor_image = Image.fromarray(anchor_image.astype(np.uint8))
             anchor_image = to_tensor(anchor_image)
             anchor_depth = anchor_depth.astype(np.float32)
-            # anchor_point_cloud = depth_to_cam_coords_points(anchor_depth, anchor_camera)
             anchor_point_cloud = unproject_depth_map_to_point_map(anchor_depth[None], anchor_pose[None], anchor_camera[None])[0]
-            # vis_pc(anchor_pc.reshape(-1,3))
             
             # load the query image and mask
-            query_image, query_mask, query_depth, updated_cam_K, _ = crop_input(query_image, 
-                                                                             query_mask, 
-                                                                             query_depth, 
-                                                                             query_camera, 
-                                                                             target_size=target_size)
-            query_mask = query_mask.astype(bool)
-
-            if query_mask.sum() < 100:
-                print(f"Skip empty mask for scene {scene_id}, image {image_id}, object {obj_id}")
+            query_image, query_mask, query_depth, updated_cam_K, valid_query = crop_input(query_image, 
+                                                                                        query_mask, 
+                                                                                        query_depth, 
+                                                                                        query_camera, 
+                                                                                        target_size=target_size)
+            if not valid_query:
+                print(f"Skip scene {batch['scene_id'][i_b]}, image {image_id}, object {obj_id} due to invalid query")
                 continue
-
-            # vis = query_image.permute(1,2,0)
-            # image_np = (vis.numpy() * 255).astype(np.uint8)  # scale to 0–255 if needed
-            # image_bgr = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
-            # cv2.imwrite("query_image.png", image_bgr)
+            query_mask = query_mask.astype(bool)
 
             anchor_image = anchor_image.unsqueeze(0) 
             query_image = query_image.unsqueeze(0) 
             images = torch.cat([anchor_image, query_image], dim=0).to(self.device)
+
+            # start
+            start = time.time()
             with torch.no_grad():
                 with torch.cuda.amp.autocast(dtype=torch.bfloat16):
                     images = images[None]  # add batch dimension
@@ -131,20 +124,11 @@ class PANY_Pipeline(LightningModule):
                 point_map, point_conf = self.model.point_head(aggregated_tokens_list, images, ps_idx)
                 point_map = point_map.squeeze(0).cpu().numpy() 
                 point_conf = point_conf.squeeze(0).cpu().numpy()
-                      
-                # # Visualize the results 
-                # points_flat = point_map.reshape(-1, 3)
-                # colors = images.squeeze(0).permute(0, 2, 3, 1).cpu().numpy()
-                # colors_flat = (colors.reshape(-1, 3) * 255).astype(np.uint8)
-                # masks = np.concatenate([anchor_mask[None], query_mask[None]], axis=0)
-                # masks_flat = masks.reshape(-1).astype(bool)
-                # save_pointcloud(points=points_flat[masks_flat], colors=colors_flat[masks_flat])
                 
                 # Align the pred point cloud with the gt point cloud
                 pred_anchor_pc = point_map[0]
                 pred_query_pc = point_map[1]
                 pred_anchor_pc = pred_anchor_pc * anchor_mask[:,:,None]  # shape (H, W, 3)
-                pred_query_pc = pred_query_pc * query_mask[:,:,None]  # shape (H, W, 3)
                 # Get the corrsponding points between pred and gt in pixel
                 src = pred_anchor_pc[anchor_mask > 0]  # shape (N, 3)
                 dst = anchor_point_cloud[anchor_mask > 0]   # shape (N, 3)
@@ -153,48 +137,45 @@ class PANY_Pipeline(LightningModule):
                 # Estimate transformation and Transform pred_pc
                 scale, R, t = robust_umeyama(src, dst, conf_anchor, conf_anchor, with_scaling=True)
 
-                pred_anchor_aligned = (scale * R @ src.T).T + t
-                # visualize the aligned point cloud
-                # save_pc_together(pred_anchor_aligned.reshape(-1,3), dst.reshape(-1,3))
                 # Apply the transformation to the target point cloud which has index 1
                 pred_query_aligned = scale * (pred_query_pc @ R.T) + t
                 pred_query_aligned = pred_query_aligned * query_mask[:, :, None]  # shape (H, W, 3)
                 
-                # # umeyama alignment
-                # # unproject the depth map to 3d points
-                # query_depth = query_depth * query_mask
-                # query_pc = depth_to_cam_coords_points(query_depth, updated_cam_K)
-                # query_pc = query_pc[query_mask].reshape(-1,3)
-                # pred_query_aligned = pred_query_aligned[query_mask].reshape(-1,3)
-                # conf_query = point_conf[1][query_mask > 0]
-                # # remove all the zero points in query_pc and the corrsponding pred_query_aligned
-                # non_zero_mask = np.linalg.norm(query_pc, axis=1) > 0
-                # query_pc = query_pc[non_zero_mask]
-                # pred_query_aligned = pred_query_aligned[non_zero_mask]
-                # conf_query = conf_query[non_zero_mask]
-                # save_pc_together(query_pc, pred_query_aligned)
+                # unproject the depth map to 3d points
+                query_depth = query_depth * query_mask
+                query_pc = depth_to_cam_coords_points(query_depth, updated_cam_K)
+                query_pc = query_pc[query_mask].reshape(-1,3)
+                pred_query_aligned = pred_query_aligned[query_mask].reshape(-1,3)
+                conf_query = point_conf[1][query_mask > 0]
+                # remove all the zero points in query_pc and the corrsponding pred_query_aligned
+                non_zero_mask = safe_l2(query_pc, axis=1) > 0
+                query_pc = query_pc[non_zero_mask]
+                pred_query_aligned = pred_query_aligned[non_zero_mask]
+                conf_query = conf_query[non_zero_mask]
 
-                # scale, R, t = robust_umeyama(pred_query_aligned, query_pc, conf_query, conf_query, with_scaling=False)
-                # pred_pose = np.eye(4)
-                # pred_pose[:3,:3] = R
-                # pred_pose[:3,3] = t 
+                # umeyama alignment
+                scale, R, t = robust_umeyama(pred_query_aligned, query_pc, conf_query, conf_query, with_scaling=False)
 
-                # # PnP
-                pred_pose = estimate_pose_from_2d3d(pred_query_aligned, query_mask, updated_cam_K)
-                
-                # save the pose result
+                # End
+                inference_time = time.time() - start
+
+                pred_pose = np.eye(4)
+                pred_pose[:3,:3] = R
+                pred_pose[:3,3] = t 
                 pred_pose = torch.from_numpy(pred_pose).float()
+
+                # save the pose result
                 R_flat = pred_pose[:3, :3].reshape(-1)
                 t_flat = pred_pose[:3, 3]  
                 self.pose_res.append(
                     {
-                    "scene_id": scene_id,
-                    "im_id": image_id,
+                    "scene_id": batch['scene_id'][i_b],
+                    "im_id": batch['image_id'][i_b],
                     "obj_id": obj_id,
                     "score": 1.0,  # Placeholder for score, can be updated later
                     "R": " ".join(map(str, R_flat.tolist())),
                     "t": " ".join(map(str, t_flat.tolist())),
-                    "time": 0.0,  # Placeholder for time, can be updated later
+                    "time": inference_time, 
                     }
                 )
             # Eval the prediction -----------------------------------------------------
@@ -211,60 +192,29 @@ class PANY_Pipeline(LightningModule):
             if obj_id not in self.metrics:
                 self.metrics[obj_id] = {
                     'ADD-0.1d': [],
-                    'ADD(S)-0.1d': []
+                    'ADD(S)-0.1d': [],
+                    'ADD-AUC': [],
+                    'ADD(S)-AUC': [],
+                    'time': [],
                 }
             self.metrics[obj_id]['ADD(S)-0.1d'].append(float(adds <= add_diam * 0.1))
             self.metrics[obj_id]['ADD-0.1d'].append(float(add <= add_diam * 0.1))
+
+            self.metrics[obj_id]['ADD(S)-AUC'].append(float(adds))
+            self.metrics[obj_id]['ADD-AUC'].append(float(add))
+
+            self.metrics[obj_id]['time'].append(inference_time)
             # Visualization ----------------------------------------------------------- 
-            # query_image_path = batch['query_image_path'][i_b] 
-            # query_image = cv2.imread(query_image_path)   
-            # query_image = cv2.cvtColor(query_image, cv2.COLOR_BGR2RGB)           
-            # # 3d bbox
-            # model_path = batch['model_path'][i_b]
-            # model = trimesh.load(model_path)
-            # model_points = np.array(model.vertices)
-            # scale = (np.max(model_points, axis=0) - np.min(model_points, axis=0))
-            # shift = np.mean(model_points, axis=0)
-            # bbox_3d = get_3d_bbox(scale, shift)
-            # # draw 3d bounding box
-            # transformed_bbox_3d = pred_pose[:3,:3]@bbox_3d + pred_pose[:3,3][:,np.newaxis]
-            # projected_bbox = calculate_2d_projections(transformed_bbox_3d.numpy(), query_camera.cpu().numpy())
-            # draw_image_bbox = draw_3d_bbox(query_image, projected_bbox, color=(0, 255, 0))
-            # # add text caption
-            # caption = f'Obj_diam_0.1: {add_diam*0.1:.2f}, ADD(S): {adds:.2f}'
-            # draw_image_bbox = draw_text(draw_image_bbox, caption, (10, 30), color=(255, 0, 0), font_scale=1, thickness=2)
-            # # save the image in RGB
-            # scene_id = batch['scene_id'][i_b]
-            # image_id = batch['image_id'][i_b]
-            # output_path = os.path.join(self.output_base, f'{scene_id:06d}_{image_id:06d}_{obj_id:06d}.png')
-            # cv2.imwrite(output_path, cv2.cvtColor(draw_image_bbox, cv2.COLOR_RGB2BGR))
-
-            try:
-                # os.makedirs(f"{self.output_base}/pose_vis", exist_ok=True)
-                # save_path = os.path.join(f"{self.output_base}/pose_vis/", f"{obj_id:06d}_{scene_id:06d}_{image_id:06d}.png")
-                # query_image_path = batch['query_image_path'][i_b]
-                # query_image = cv2.imread(query_image_path)  
-                # query_image = cv2.cvtColor(query_image, cv2.COLOR_BGR2RGB)
-                # query_mask = batch['query_mask'][i_b].cpu().numpy()
-                # pred_pose[:3,3] = pred_pose[:3,3] / 1000.0  # to m
-                # query_gt_pose[:3,3] = query_gt_pose[:3,3] / 1000.0  # to m
-                # anchor_camera = batch['anchor_intri'][i_b].cpu().numpy()
-                # draw_pose_from_axis(query_image, anchor_camera, pred_pose.numpy(), query_gt_pose, save_path, mask=query_mask)
-
-                # visualization nocs
-                os.makedirs(f"{self.output_base}/nocs_vis/{obj_id:02d}", exist_ok=True)
-                save_path = os.path.join(f"{self.output_base}/nocs_vis/{obj_id:02d}", f"{scene_id:06d}_{image_id:06d}.png")
-                # concat the ref nocs and pred nocs
-                vis_anchor_nocs = visualize_pts(pred_anchor_pc, mask=anchor_mask)
-                vis_query_nocs = visualize_pts(pred_query_pc, mask=query_mask)
-                # resize the nocs to 192 x 192
-                vis_anchor_nocs = cv2.resize(vis_anchor_nocs, (192,192), interpolation=cv2.INTER_NEAREST)
-                vis_query_nocs = cv2.resize(vis_query_nocs, (192,192), interpolation=cv2.INTER_NEAREST)
-                nocs_vis = np.concatenate([vis_anchor_nocs, vis_query_nocs], axis=1)
-                viz.save_array_to_image(nocs_vis, save_path)
-            except Exception as e:
-                print(f"Visualization failed for scene {scene_id}, image {image_id}, object {obj_id}: {e}")
-
+            save_path = os.path.join(self.output_base, f'pose_vis/{obj_id:02d}/{scene_id:06d}_{image_id:06d}.png')
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            query_image_path = batch['query_image_path'][i_b]
+            query_image = cv2.imread(query_image_path)  
+            query_image = cv2.cvtColor(query_image, cv2.COLOR_BGR2RGB)
+            query_mask = batch['query_mask'][i_b].cpu().numpy()
+            pred_pose[:3,3] = pred_pose[:3,3] / 1000.0  # to m
+            query_gt_pose[:3,3] = query_gt_pose[:3,3] / 1000.0  # to m
+            anchor_camera = batch['anchor_intri'][i_b].cpu().numpy()
+            draw_pose_from_axis(query_image, anchor_camera, pred_pose.numpy(), query_gt_pose, save_path, mask=query_mask)
 
     def on_test_end(self):
         '''
@@ -277,6 +227,9 @@ class PANY_Pipeline(LightningModule):
 
         # save the metrics to a log file
         log_path = os.path.join(self.output_base, 'log.txt')
+        all_add_auc = []
+        all_adds_auc = []
+        all_inference_time = []
         with open(log_path, 'w') as log_file:
             for obj_id in sorted(self.metrics.keys()):
                 add_vals = self.metrics[obj_id]['ADD-0.1d']
@@ -284,8 +237,16 @@ class PANY_Pipeline(LightningModule):
                 
                 add_mean = np.mean(add_vals) if add_vals else 0.0
                 adds_mean = np.mean(adds_vals) if adds_vals else 0.0
+
+                add_auc = self.get_auc(self.metrics[obj_id]['ADD-AUC'], max_val=0.1*1e3)
+                adds_auc = self.get_auc(self.metrics[obj_id]['ADD(S)-AUC'], max_val=0.1*1e3)
+                all_add_auc.append(add_auc)
+                all_adds_auc.append(adds_auc)
+
+                inference_time_mean = np.mean(self.metrics[obj_id]['time'])
+                all_inference_time.append(inference_time_mean)
                 
-                line = f'Object {obj_id:02d} - ADD-0.1d: {add_mean:.4f}, ADD(S)-0.1d: {adds_mean:.4f}'
+                line = f'Object {obj_id:02d} - ADD-0.1d: {add_mean:.4f}, ADD(S)-0.1d: {adds_mean:.4f}, ADD_AUC: {add_auc:.4f}, ADD(S)_AUC: {adds_auc:.4f}, inference_time: {inference_time_mean:.4f}'
                 print(line)
                 log_file.write(line + '\n')
 
@@ -297,13 +258,46 @@ class PANY_Pipeline(LightningModule):
 
             total_add_line = f'Total ADD-0.1d: {np.mean(all_add):.4f}'
             total_adds_line = f'Total ADD(S)-0.1d: {np.mean(all_adds):.4f}'
+            total_add_auc_line = f'Total ADD_AUC: {np.mean(all_add_auc):.4f}'
+            total_adds_auc_line = f'Total ADD(S)_AUC: {np.mean(all_adds_auc):.4f}'
+            avg_inference_time_line = f'Avg inference time: {np.mean(all_inference_time):.4f}'
             
             print(total_add_line)
             print(total_adds_line)
+            print(total_add_auc_line)
+            print(total_adds_auc_line)
+            print(avg_inference_time_line)
             log_file.write(total_add_line + '\n')
             log_file.write(total_adds_line + '\n')
+            log_file.write(total_add_auc_line + '\n')
+            log_file.write(total_adds_auc_line + '\n')
+            log_file.write(avg_inference_time_line + '\n')
 
         return super().on_test_end()
+    
+    def get_auc(self, rec, max_val=0.1):
+        if len(rec)==0:
+            return 0
+        rec = np.sort(np.array(rec))
+        n = len(rec)
+        prec = np.arange(1,n+1) / float(n)
+        rec = rec.reshape(-1)
+        prec = prec.reshape(-1)
+        index = np.where(rec<max_val)[0]
+        rec = rec[index]
+        prec = prec[index]
+        if len(rec) == 0:
+            return 0
+        mrec=[0, *list(rec), max_val]
+        mpre=[0, *list(prec), prec[-1]]
+
+        for i in range(1,len(mpre)):
+            mpre[i] = max(mpre[i], mpre[i-1])
+        mpre = np.array(mpre)
+        mrec = np.array(mrec)
+        i = np.where(mrec[1:]!=mrec[0:len(mrec)-1])[0] + 1
+        ap = np.sum((mrec[i] - mrec[i-1]) * mpre[i]) / max_val
+        return ap
     
     def add_object_info(self, obj_models: dict, obj_diams: dict, obj_symms: dict):
         # these are supposed to be in mm!
@@ -328,15 +322,13 @@ class PANY_Pipeline(LightningModule):
             dataset=test_set,
             batch_size=args.dataset.batch_size,
             shuffle=False,
-            num_workers=8
+            num_workers=0
         )
 
         return test_loader
 
 
 def eval_pipeline(args: DictConfig) -> None:
-
-    torch.set_float32_matmul_precision('medium')
     system = PANY_Pipeline(args)
 
     trainer = Trainer(
@@ -354,10 +346,9 @@ def eval_pipeline(args: DictConfig) -> None:
     trainer.test(system, test_data)
 
 if __name__ == '__main__':
-    with open("scripts/configs/lmo_rgb.yaml", "r") as f:
+    with open("scripts/configs/ycbv_rgbd.yaml", "r") as f:
         raw_cfg = yaml.safe_load(f)
     
-    # Optional: Convert dict to OmegaConf if needed
     args = OmegaConf.create(raw_cfg)
     
     eval_pipeline(args)

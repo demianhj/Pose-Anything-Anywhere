@@ -10,11 +10,11 @@ import sys
 sys.path.append(os.getcwd())
 from vggt.utils.geometry import unproject_depth_map_to_point_map, depth_to_cam_coords_points
 from training.vis_utils import visualize_pts
-from hydra import initialize, compose
+from hydra import compose, initialize_config_dir
 from inference_utils.visualization import *
 from inference_utils.utils import center_crop, crop_input, to_tensor
 from inference_utils.model import load_model
-from inference_utils.pose_estimation import robust_umeyama, estimate_pose_from_2d3d, ransac_weighted_umeyama 
+from inference_utils.pose_estimation import robust_umeyama 
 
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
@@ -22,7 +22,7 @@ from pytorch_lightning import Trainer, LightningModule
 from inference_utils.datasets import BOP_Dataset
 from inference_utils.oryon_utils.pcd import get_diameter
 from inference_utils.oryon_utils.metrics import compute_add, compute_adds
-from bop_toolkit_lib.misc import format_sym_set
+from inference_utils.oryon_utils.misc import format_sym_set, safe_l2
 
 class PANY_Pipeline(LightningModule):
     """
@@ -37,7 +37,8 @@ class PANY_Pipeline(LightningModule):
 
         self.args = args
 
-        with initialize(version_base=None, config_path="../training"):
+        config_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../..", "training"))
+        with initialize_config_dir(version_base=None, config_dir=config_dir):
             config = compose(config_name=args.model_config)
     
         # Initialize the VGGT model
@@ -96,9 +97,7 @@ class PANY_Pipeline(LightningModule):
             anchor_image = Image.fromarray(anchor_image.astype(np.uint8))
             anchor_image = to_tensor(anchor_image)
             anchor_depth = anchor_depth.astype(np.float32)
-            # anchor_point_cloud = depth_to_cam_coords_points(anchor_depth, anchor_camera)
             anchor_point_cloud = unproject_depth_map_to_point_map(anchor_depth[None], anchor_pose[None], anchor_camera[None])[0]
-            # vis_pc(anchor_pc.reshape(-1,3))
             
             # load the query image and mask
             query_image, query_mask, query_depth, updated_cam_K, _ = crop_input(query_image, 
@@ -111,11 +110,6 @@ class PANY_Pipeline(LightningModule):
             if query_mask.sum() < 500:
                 print(f"Skip the image with too small mask: scene_id {scene_id}, image_id {image_id}, obj_id {obj_id}, mask_sum {query_mask.sum()}")
                 continue
-
-            # vis = query_image.permute(1,2,0)
-            # image_np = (vis.numpy() * 255).astype(np.uint8)  # scale to 0–255 if needed
-            # image_bgr = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
-            # cv2.imwrite("query_image.png", image_bgr)
 
             anchor_image = anchor_image.unsqueeze(0) 
             query_image = query_image.unsqueeze(0) 
@@ -143,14 +137,6 @@ class PANY_Pipeline(LightningModule):
                 save_path = os.path.join(self.output_base, f'nocs_vis/{obj_id:02d}/{scene_id:06d}_{image_id:06d}.png')
                 os.makedirs(os.path.dirname(save_path), exist_ok=True)
                 cv2.imwrite(save_path, nocs_vis)
-                      
-                # # Visualize the results 
-                # points_flat = point_map.reshape(-1, 3)
-                # colors = images.squeeze(0).permute(0, 2, 3, 1).cpu().numpy()
-                # colors_flat = (colors.reshape(-1, 3) * 255).astype(np.uint8)
-                # masks = np.concatenate([anchor_mask[None], query_mask[None]], axis=0)
-                # masks_flat = masks.reshape(-1).astype(bool)
-                # save_pointcloud(points=points_flat[masks_flat], colors=colors_flat[masks_flat])
                 
                 # Align the pred point cloud with the gt point cloud
                 pred_anchor_pc = point_map[0]
@@ -164,9 +150,6 @@ class PANY_Pipeline(LightningModule):
                 # Estimate transformation and Transform pred_pc
                 scale, R, t = robust_umeyama(src, dst, conf_anchor, conf_anchor, with_scaling=True)
                 
-                pred_anchor_aligned = (scale * R @ src.T).T + t
-                # visualize the aligned point cloud
-                # save_pc_together(pred_anchor_aligned.reshape(-1,3), dst.reshape(-1,3))
                 # Apply the transformation to the target point cloud which has index 1
                 pred_query_aligned = scale * (pred_query_pc @ R.T) + t
                 pred_query_aligned = pred_query_aligned * query_mask[:, :, None]  # shape (H, W, 3)
@@ -178,11 +161,10 @@ class PANY_Pipeline(LightningModule):
                 pred_query_aligned = pred_query_aligned[query_mask].reshape(-1,3)
                 conf_query = point_conf[1][query_mask > 0]
                 # remove all the zero points in query_pc and the corrsponding pred_query_aligned
-                non_zero_mask = np.linalg.norm(query_pc, axis=1) > 0
+                non_zero_mask = safe_l2(query_pc, axis=1) > 0
                 query_pc = query_pc[non_zero_mask]
                 pred_query_aligned = pred_query_aligned[non_zero_mask]
                 conf_query = conf_query[non_zero_mask]
-                # save_pc_together(query_pc, pred_query_aligned)
 
                 # umeyama alignment
                 scale, R, t = robust_umeyama(pred_query_aligned, query_pc, conf_query, conf_query, with_scaling=False)
@@ -224,30 +206,8 @@ class PANY_Pipeline(LightningModule):
                 }
             self.metrics[obj_id]['ADD(S)-0.1d'].append(float(adds <= add_diam * 0.1))
             self.metrics[obj_id]['ADD-0.1d'].append(float(add <= add_diam * 0.1))
-            # Visualization ----------------------------------------------------------- 
-            # query_image_path = batch['query_image_path'][i_b] 
-            # query_image = cv2.imread(query_image_path)   
-            # query_image = cv2.cvtColor(query_image, cv2.COLOR_BGR2RGB)           
-            # # 3d bbox
-            # model_path = batch['model_path'][i_b]
-            # model = trimesh.load(model_path)
-            # model_points = np.array(model.vertices)
-            # scale = (np.max(model_points, axis=0) - np.min(model_points, axis=0))
-            # shift = np.mean(model_points, axis=0)
-            # bbox_3d = get_3d_bbox(scale, shift)
-            # # draw 3d bounding box
-            # transformed_bbox_3d = pred_pose[:3,:3]@bbox_3d + pred_pose[:3,3][:,np.newaxis]
-            # projected_bbox = calculate_2d_projections(transformed_bbox_3d.numpy(), query_camera.cpu().numpy())
-            # draw_image_bbox = draw_3d_bbox(query_image, projected_bbox, color=(0, 255, 0))
-            # # add text caption
-            # caption = f'Obj_diam_0.1: {add_diam*0.1:.2f}, ADD(S): {adds:.2f}'
-            # draw_image_bbox = draw_text(draw_image_bbox, caption, (10, 30), color=(255, 0, 0), font_scale=1, thickness=2)
-            # # save the image in RGB
-            # scene_id = batch['scene_id'][i_b]
-            # image_id = batch['image_id'][i_b]
-            # output_path = os.path.join(self.output_base, f'{scene_id:06d}_{image_id:06d}_{obj_id:06d}.png')
-            # cv2.imwrite(output_path, cv2.cvtColor(draw_image_bbox, cv2.COLOR_RGB2BGR))
 
+            # Visualization ----------------------------------------------------------- 
             save_path = os.path.join(self.output_base, f'pose_vis/{obj_id:02d}/{scene_id:06d}_{image_id:06d}.png')
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             query_image_path = batch['query_image_path'][i_b]
@@ -351,7 +311,6 @@ if __name__ == '__main__':
     with open("scripts/configs/lm_rgbd.yaml", "r") as f:
         raw_cfg = yaml.safe_load(f)
     
-    # Optional: Convert dict to OmegaConf if needed
     args = OmegaConf.create(raw_cfg)
     
     eval_pipeline(args)

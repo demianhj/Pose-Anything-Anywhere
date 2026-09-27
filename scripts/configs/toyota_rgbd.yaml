@@ -29,7 +29,7 @@ tmp:
   ckpt_out: output/exp_data/oryon_final/models
   results_out: output/exp_data/oryon_final/results
 
-ckpt_path: ckpt/last_7500.ckpt
+ckpt_path: ckpt/pany.ckpt
 model_config: pany_model
 model_name: fine_tuned
 use_depth: True

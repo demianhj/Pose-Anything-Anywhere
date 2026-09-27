@@ -7,8 +7,7 @@ dataset:
   depth_scale: 1 # Scale factor for depth images
   
 mask_type: "gt" # Options: "gt", "cnos"
-# ckpt_path: False
-ckpt_path: ckpt/last_7500.ckpt
+ckpt_path: ckpt/pany.ckpt
 model_config: pany_model
 model_name: fine_tuned
 output_base: /media/tum/data1/datasets/bop-dataset/lm/exp_out

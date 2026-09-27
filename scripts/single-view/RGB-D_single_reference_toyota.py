@@ -1,5 +1,4 @@
 import os
-import os.path as osp
 import torch
 import numpy as np
 import cv2
@@ -7,9 +6,19 @@ from PIL import Image
 import yaml
 
 import sys
-sys.path.append(os.getcwd())
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+
+def repo_path(path):
+    if not path or os.path.isabs(path):
+        return path
+    return os.path.join(REPO_ROOT, path)
+
+
 from vggt.utils.geometry import unproject_depth_map_to_point_map, depth_to_cam_coords_points
-from hydra import initialize, compose
+from hydra import compose, initialize_config_dir
 from inference_utils.visualization import *
 from inference_utils.utils import center_crop, crop_input, to_tensor
 from inference_utils.model import load_model
@@ -39,9 +48,10 @@ class PANY_Pipeline(LightningModule):
         super().__init__()
 
         self.args = args
-        self.evaluator = Evaluator(args.exp_tag, compute_vsd=True, compute_iou=False)
+        self.evaluator = Evaluator(args.exp_tag, compute_vsd=args.get("compute_vsd", True), compute_iou=False)
 
-        with initialize(version_base=None, config_path="../training"):
+        config_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../..", "training"))
+        with initialize_config_dir(version_base=None, config_dir=config_dir):
             config = compose(config_name=args.model_config)
     
         # Initialize the PANY model
@@ -119,10 +129,6 @@ class PANY_Pipeline(LightningModule):
         target_size = (518, 518)
         for i_b in range(BS):
             instance_id_a, instance_id_q = batch['anchor']['instance_id'][i_b], batch['query']['instance_id'][i_b]
-            # instance_id = batch['instance_id'][i_b]
-            # if instance_id != "3_37_3_51_3":
-            #     continue
-            #-----------------------------------------------------
             anchor_image = batch['anchor']['orig_rgb'][i_b]
             anchor_mask = batch['anchor']['mask'][i_b]
             anchor_depth = batch['anchor']['orig_depth'][i_b]
@@ -158,7 +164,6 @@ class PANY_Pipeline(LightningModule):
             anchor_depth = anchor_depth.astype(np.float32)
             anchor_pose[:3, 3] *= 1000
             anchor_point_cloud = unproject_depth_map_to_point_map(anchor_depth[None], anchor_pose[None], anchor_camera[None])[0]
-            # vis_pc(anchor_pc.reshape(-1,3))
             
             # load the query image and mask
             query_image, query_mask, query_depth, updated_cam_K, _ = crop_input(query_image, 
@@ -171,15 +176,9 @@ class PANY_Pipeline(LightningModule):
             query_mask = query_mask.astype(bool)
             vis_query_mask = query_mask.copy()
 
-            # vis = query_image.permute(1,2,0)
-            # image_np = (vis.numpy() * 255).astype(np.uint8)  # scale to 0–255 if needed
-            # image_bgr = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
-            # cv2.imwrite("query_image.png", image_bgr)
-
             anchor_image = anchor_image.unsqueeze(0) 
             query_image = query_image.unsqueeze(0) 
             images = torch.cat([anchor_image, query_image], dim=0).to(self.device)
-            # images = torch.cat([query_image, anchor_image], dim=0).to(self.device)
             with torch.no_grad():
                 with torch.cuda.amp.autocast(dtype=torch.bfloat16):
                     images = images[None]  # add batch dimension
@@ -189,14 +188,6 @@ class PANY_Pipeline(LightningModule):
                 point_map, point_conf = self.model.point_head(aggregated_tokens_list, images, ps_idx)
                 point_map = point_map.squeeze(0).cpu().numpy() 
                 point_conf = point_conf.squeeze(0).cpu().numpy()
-                      
-                # # Visualize the results 
-                # points_flat = point_map.reshape(-1, 3)
-                # colors = images.squeeze(0).permute(0, 2, 3, 1).cpu().numpy()
-                # colors_flat = (colors.reshape(-1, 3) * 255).astype(np.uint8)
-                # masks = np.concatenate([anchor_mask[None], query_mask[None]], axis=0)
-                # masks_flat = masks.reshape(-1).astype(bool)
-                # save_pointcloud(points=points_flat[masks_flat], colors=colors_flat[masks_flat])
                 
                 # Align the pred point cloud with the gt point cloud
                 pred_anchor_pc = point_map[0]
@@ -212,35 +203,16 @@ class PANY_Pipeline(LightningModule):
                 # Estimate transformation and Transform pred_pc
                 scale, R, t = robust_umeyama(src, dst, conf_anchor, conf_anchor, with_scaling=True)
 
-                pred_anchor_aligned = (scale * R @ src.T).T + t
-                # visualize the aligned point cloud
-                # save_pc_together(src.reshape(-1,3), dst.reshape(-1,3))
-                # save_pc_together(pred_anchor_aligned.reshape(-1,3), dst.reshape(-1,3))
                 # Apply the transformation to the target point cloud which has index 1
                 pred_query_aligned = scale * (pred_query_pc @ R.T) + t
                 pred_query_aligned = pred_query_aligned * query_mask[:, :, None]  # shape (H, W, 3)
-                # save_pc_together(pred_query_aligned.reshape(-1,3), dst.reshape(-1,3))
 
                 # unproject the depth map to 3d points
                 query_depth = query_depth * query_mask
                 query_pc = depth_to_cam_coords_points(query_depth, updated_cam_K)
-
-                # ----------------------------------------------------
-                # pred_query_aligned, anchor_matched, query_mask = get_correspondence(pred_query_aligned, dst, k_nn=5)
                 pred_query_aligned, anchor_matched, query_mask = get_correspondence_torch(pred_query_aligned, dst, k_nn=5)
                 conf_query = point_conf[1][query_mask > 0]
                 query_pc = query_pc[query_mask].reshape(-1,3)
-                # ----------------------------------------------------
-                # query_pc = query_pc[query_mask].reshape(-1,3)
-                # pred_query_aligned = pred_query_aligned[query_mask].reshape(-1,3)
-                # conf_query = point_conf[1][query_mask > 0]
-
-                # # remove all the zero points in query_pc and the corrsponding pred_query_aligned
-                # non_zero_mask = np.linalg.norm(query_pc, axis=1) > 0
-                # query_pc = query_pc[non_zero_mask]
-                # pred_query_aligned = pred_query_aligned[non_zero_mask]
-                # conf_query = conf_query[non_zero_mask]
-                # # save_pc_together(query_pc, pred_query_aligned)
 
                 # umeyama alignment
                 if self.use_depth:
@@ -249,15 +221,7 @@ class PANY_Pipeline(LightningModule):
                     except Exception as e:
                         print(f"Error in pose estimation: {e}")
                         scale, R, t = 1.0, np.eye(3), np.zeros(3)
-                    # ---------------------------------------------------
-                    # transform_pose = np.eye(4)
-                    # transform_pose[:3, :3] = R
-                    # transform_pose[:3, 3] = t 
-                    # transformed_query_pc = cam_coords_points_to_world_coords_points(query_pc, transform_pose[:3, :4])
-                        
-                    # transformed_query is red and anchor_matched is green
-                    # save_pc_together(transformed_query_pc.reshape(-1,3), anchor_matched.reshape(-1,3))
-                    # ---------------------------------------------------
+
                     pred_pose = np.eye(4)
                     pred_pose[:3,:3] = R
                     pred_pose[:3,3] = t / 1000  # convert to meters
@@ -387,13 +351,14 @@ def eval_pipeline(args: DictConfig) -> None:
     trainer.test(system, test_data)
 
 if __name__ == '__main__':
-    with open("scripts/configs/toyota_rgbd.yaml", "r") as f:
+    config_path = os.path.join(REPO_ROOT, "scripts/configs/toyota_rgbd.yaml")
+    with open(config_path, "r") as f:
         raw_cfg = yaml.safe_load(f)
-
-    # with open("scripts/configs/nocs_real275_rgbd.yaml", "r") as f:
-    #     raw_cfg = yaml.safe_load(f)
     
-    # Optional: Convert dict to OmegaConf if needed
     args = OmegaConf.create(raw_cfg)
+    args.ckpt_path = repo_path(args.ckpt_path)
+    args.tmp.logs_out = repo_path(args.tmp.logs_out)
+    args.tmp.ckpt_out = repo_path(args.tmp.ckpt_out)
+    args.tmp.results_out = repo_path(args.tmp.results_out)
     
     eval_pipeline(args)

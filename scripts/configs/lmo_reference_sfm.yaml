@@ -1,0 +1,62 @@
+device: auto
+dataset_name: lmo
+training_config_path: training
+model_config: pany_model
+ckpt_path: ckpt/pany.ckpt
+
+lora:
+  r: 8
+  alpha: 32
+  dropout: 0.05
+
+reference:
+  base_dir: data/multi-view-references/lmo
+  object_dir_pattern: obj_{obj_id:06d}
+  obj_ids: [1, 5, 6, 8, 9, 10, 11, 12]
+  num_templates: 8
+  camera_file: camera.npz
+  intrinsics_key: intrinsics
+  extrinsics_key: extrinsics
+  rgb_pattern: rgb_{idx:02d}.png
+  depth_pattern: depth_{idx:02d}.png
+  mask_pattern: mask_{idx:02d}.png
+
+inference:
+  anchor_id: 0
+  top_k: 2
+  use_conf: false
+  depth_stride: 2
+  z_min: 1.0e-6
+  z_max:
+  intrinsics_stride: 8
+  allow_intrinsics_skew: false
+  n_sample_point: 2048
+  min_valid_matches: 6
+  min_match_threshold: 500
+  min_pose_points: 10
+
+visualization:
+  show: false
+  local_map_colormap: tab20
+  local_map_color_count: 10
+  global_merge_max_points: 200000
+  global_cam_max_points: 20000
+  global_geometry_max_points: 20000
+  camera_axis_scale: 0.1
+
+outputs:
+  root: data/ref_data/{dataset_name}
+  local_map_dir: local_map
+  local_map_pattern: localmap3d_center_{query_id:02d}.png
+  match_dir: match
+  match_pattern: gt_match_{query_id:02d}.png
+  global_merge_dir: global_merge
+  global_merge_pattern: "{obj_id}.png"
+  global_cam_dir: global_cam
+  global_cam_pattern: "{obj_id}.png"
+  ref_coords_dir: ref_coords
+  ref_coords_pattern: "{obj_id}_ref_vs_frames.png"
+  ply_dir: ply
+  ply_pattern: "{obj_id}_global_map_aligned.ply"
+  pkl_dir: pkl
+  pkl_pattern: "{obj_id}.pkl"
